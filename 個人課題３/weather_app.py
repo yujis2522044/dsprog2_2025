@@ -1,5 +1,6 @@
 import requests
 import flet as ft
+import sqlite3 # SQLiteを使用するために追加
 
 FORECAST_BASE_URL = "https://www.jma.go.jp/bosai/forecast/data/forecast/"
 
@@ -13,6 +14,49 @@ PREFS = {
     "中国・四国地方": {"310000": "鳥取", "320000": "島根", "330000": "岡山", "340000": "広島", "350000": "山口", "360000": "徳島", "370000": "香川", "380000": "愛媛", "390000": "高知"},
     "九州・沖縄地方": {"400000": "福岡", "410000": "佐賀", "420000": "長崎", "430000": "熊本", "440000": "大分", "450000": "宮崎", "460100": "鹿児島", "471000": "沖縄"}
 }
+
+# --- 🗄 データベース関連の関数 ---
+
+def init_db():
+    """データベースとテーブルの初期化"""
+    conn = sqlite3.connect('weather.db')
+    cursor = conn.cursor()
+    # 日付と地域コードを組み合わせてプライマリーキー（一意）にする設計
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS forecasts (
+            date TEXT,
+            area_code TEXT,
+            area_name TEXT,
+            weather TEXT,
+            temp_min TEXT,
+            temp_max TEXT,
+            PRIMARY KEY (date, area_code)
+        )
+    ''')
+    conn.commit()
+    return conn
+
+def save_to_db(forecast_list):
+    """取得したデータを一括でDBに保存"""
+    conn = sqlite3.connect('weather.db')
+    cursor = conn.cursor()
+    cursor.executemany('''
+        INSERT OR REPLACE INTO forecasts (date, area_code, area_name, weather, temp_min, temp_max)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', forecast_list)
+    conn.commit()
+    conn.close()
+
+def get_from_db(area_code):
+    """DBから特定の地域の予報を取得"""
+    conn = sqlite3.connect('weather.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT date, weather, temp_min, temp_max FROM forecasts WHERE area_code = ? ORDER BY date ASC', (area_code,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+# --- 🌤 アプリのロジック ---
 
 def get_forecast_data(area_code):
     """APIからデータを取得"""
@@ -37,7 +81,7 @@ def create_forecast_card(date_str, weather_text, temp_min, temp_max):
                 ft.Icon(get_weather_icon(weather_text), size=50, color="orange_400"),
                 ft.Text(weather_text, size=14, weight="bold", text_align="center"),
                 ft.Row([
-                    ft.Text(f"{temp_min}°C", color="    _600", size=18, weight="bold"),
+                    ft.Text(f"{temp_min}°C", color="blue_600", size=18, weight="bold"),
                     ft.Text("/", size=18, color="grey"),
                     ft.Text(f"{temp_max}°C", color="red_600", size=18, weight="bold"),
                 ], alignment="center")
@@ -47,33 +91,32 @@ def create_forecast_card(date_str, weather_text, temp_min, temp_max):
     )
 
 def main(page: ft.Page):
-    page.title = "気象庁 天気予報アプリ"
-    page.bgcolor = "#CFD8DC" # 背景を落ち着いたグレーに
+    # DB初期化
+    init_db()
+
+    page.title = "気象庁 天気予報アプリ (SQLite版)"
+    page.bgcolor = "#CFD8DC"
     page.padding = 0
 
     forecast_display = ft.Row(wrap=True, spacing=20, scroll="auto", expand=True)
     title_text = ft.Text("地域を選択してください", size=24, weight="bold", color="white")
     
-    # 選択中のListTileを記録
     current_tile = [None]
 
     def on_area_select(e, area_code, area_name):
-        # 今まで選択していたものの色を戻す
         if current_tile[0]:
             current_tile[0].selected = False
             current_tile[0].update()
 
-        # 今選んだものをハイライト
         e.control.selected = True
         e.control.update()
         current_tile[0] = e.control
 
-        # データの表示
         title_text.value = f"{area_name}の天気予報"
-        data = get_forecast_data(area_code)
         
-        # 解析処理（簡単にするためここに記述）
         try:
+            # 1. まずAPIから最新データを取得
+            data = get_forecast_data(area_code)
             time_series = data[0]['timeSeries']
             dates = time_series[0]['timeDefines']
             weathers = time_series[0]['areas'][0]['weathers']
@@ -83,14 +126,28 @@ def main(page: ft.Page):
                     temps = s['areas'][0]['temps']
                     break
             
-            new_cards = []
+            # 2. データをDB保存用に整形
+            forecast_list = []
             for i in range(len(weathers)):
                 t_min = temps[i*2] if len(temps) > i*2 else "-"
                 t_max = temps[i*2+1] if len(temps) > i*2 else "-"
-                new_cards.append(create_forecast_card(dates[i], weathers[i], t_min, t_max))
+                # (date, area_code, area_name, weather, temp_min, temp_max)
+                forecast_list.append((dates[i][:10], area_code, area_name, weathers[i], t_min, t_max))
+            
+            # 3. DBへ保存（INSERT OR REPLACE）
+            save_to_db(forecast_list)
+
+            # 4. 表示のために「あえてDBから」読み出す（移行の証明）
+            db_data = get_from_db(area_code)
+            
+            new_cards = []
+            for row in db_data:
+                # row[0]=date, row[1]=weather, row[2]=temp_min, row[3]=temp_max
+                new_cards.append(create_forecast_card(row[0], row[1], row[2], row[3]))
             
             forecast_display.controls = new_cards
-        except:
+        except Exception as ex:
+            print(ex)
             forecast_display.controls = [ft.Text("読み込み失敗", color="red")]
         
         page.update()
@@ -105,21 +162,20 @@ def main(page: ft.Page):
             tile = ft.ListTile(
                 title=ft.Text(name, color="white"),
                 subtitle=ft.Text(code, color="white38", size=10),
-                selected_color=ft.Colors.YELLOW_ACCENT, # 選択中の文字色
-                selected_tile_color=ft.Colors.WHITE10,   # 選択中の背景色
+                selected_color=ft.Colors.YELLOW_ACCENT,
+                selected_tile_color=ft.Colors.WHITE10,
                 on_click=lambda e, c=code, n=name: on_area_select(e, c, n),
-                # ListTileなら自動でホバー（マウス乗せ）反応がつきます！
             )
             sidebar_content.append(tile)
 
     sidebar = ft.Container(
         content=ft.Column(sidebar_content, scroll="auto", spacing=0),
-        width=240, bgcolor="#37474F", padding=10 # サイドバーの色を画像に近く
+        width=240, bgcolor="#37474F", padding=10
     )
 
     header = ft.Container(
         content=ft.Row([ft.Icon(ft.Icons.WB_SUNNY, color="white"), title_text], alignment="start"),
-        bgcolor="#303F9F", padding=20 # ヘッダーを画像のような濃い青に
+        bgcolor="#303F9F", padding=20
     )
 
     main_view = ft.Column([
