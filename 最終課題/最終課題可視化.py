@@ -13,7 +13,7 @@ def main(page: ft.Page):
     # 1. データベースからデータを取得する関数
     # -----------------------------------------
     def get_data_from_db(keyword=""):
-        conn = sqlite3.connect('最終課題.db')
+        conn = sqlite3.connect('最終課題/最終課題.db')
         cur = conn.cursor()
         
         if keyword:
